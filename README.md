@@ -2,6 +2,8 @@
 
 > **Turn a written trade plan into a live chart. No signals — just your plan, drawn.**
 
+**TradingView script:** https://cn.tradingview.com/script/mHzKfd7Z/
+
 A Pine Script v6 indicator for TradingView that takes **your own trade plan** — entry ladder, confirmation trigger, invalidation, targets — draws it on the chart, computes risk/reward and position size for each tranche, and fires price alerts with the computed quantity.
 
 Most indicators tell you *when to buy*. This one assumes you already did the analysis: it enforces the plan.
@@ -18,6 +20,10 @@ Most indicators tell you *when to buy*. This one assumes you already did the ana
 - 🔔 **7 alert conditions** + one dynamic `alert()` stream with quantity included
 
 ## Install
+
+**Option A — direct:** open the script on TradingView and add it to your chart: https://cn.tradingview.com/script/mHzKfd7Z/
+
+**Option B — from source:**
 
 1. Open TradingView → **Pine Editor**
 2. Paste the contents of [`Trade-Plan-Ladder-v0.2.1-public.pine`](./Trade-Plan-Ladder-v0.2.1-public.pine)
