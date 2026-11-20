@@ -1,0 +1,459 @@
+//@version=6
+indicator("Trade Plan Ladder | Entry Zones • R:R • Sizing • Alerts", overlay = true, max_lines_count = 300, max_labels_count = 120, max_boxes_count = 60)
+// ─────────────────────────────────────────────────────────────────────────────
+// Trade Plan Ladder v0.2.1 (public) — Turn a written trade plan into a live chart.
+//
+// Most indicators tell you WHEN to buy. This one does something different:
+// it takes YOUR plan — entry ladder, confirmation trigger, invalidation,
+// targets — draws it, prices the risk, sizes each tranche, and reminds you.
+// No signals. No repainting. Just your plan, drawn.
+//
+// Level modes
+//   • Relative % (default): every level = yesterday's close × (1 + your %).
+//     Works out-of-the-box on ANY symbol. Re-anchors daily, like pivot points.
+//   • Absolute: exact prices for a fixed plan.
+//
+// Entries: A1/A2 limit ladder + B confirmation trigger (N closes above trigger
+// = stabilization) + C trend-continuation pullback.
+// Protection: invalidation on DAILY CLOSE + intrabar hard stop — wicks and
+// closes are different things.
+// Extras: R:R per tranche · position sizing · 7 alerts · dual auto trendlines
+// (external pivot line + internal regression line) · band-filtered drawing.
+//
+// Not a strategy(): places no orders. Educational tool, not financial advice.
+// Quantity is full-size math — always verify against your account.
+// Recommended timeframe: 1h+ (B confirmation counts chart-TF closes).
+// ─────────────────────────────────────────────────────────────────────────────
+
+string G0 = "0. Level mode"
+string lvlMode = input.string("Relative %", "Mode", options = ["Relative %", "Absolute"], group = G0)
+
+string G1 = "1. Levels — Relative % vs yesterday's close"
+float a1TopPct        = input.float(-2, "A1 zone top %", step = 0.1, group = G1)
+float a1BotPct        = input.float(-3, "A1 zone bottom %", step = 0.1, group = G1)
+float a2Pct           = input.float(-1.5, "A2 level %", step = 0.1, group = G1)
+float trigPct         = input.float(-0.5, "B trigger %", step = 0.1, group = G1)
+float bEntryPct       = input.float(-0.2, "B entry estimate %", step = 0.1, group = G1)
+float bStopPct        = input.float(-1, "B stop %", step = 0.1, group = G1)
+float hardStopPct     = input.float(-5, "Hard stop %", step = 0.1, group = G1)
+float invalidPct      = input.float(-4, "Invalidation %", step = 0.1, group = G1)
+float t1Pct           = input.float(8, "Target T1 %", step = 0.1, group = G1)
+float t2Pct           = input.float(15, "Target T2 %", step = 0.1, group = G1)
+float cEntryPct       = input.float(13, "C pullback %", step = 0.1, group = G1)
+float cStopPct        = input.float(10, "C stop %", step = 0.1, group = G1)
+float t3Pct           = input.float(25, "Trend target T3 %", step = 0.1, group = G1)
+
+string G1B = "1b. Absolute levels (used only in Absolute mode)"
+float a1TopAbs        = input.float(98, "A1 zone top", step = 0.1, group = G1B)
+float a1BotAbs        = input.float(97, "A1 zone bottom", step = 0.1, group = G1B)
+float a2Abs           = input.float(98.5, "A2 level", step = 0.1, group = G1B)
+float trigAbs         = input.float(100.5, "B trigger", step = 0.1, group = G1B)
+float bEntryAbs       = input.float(100.8, "B entry estimate", step = 0.1, group = G1B)
+float bStopAbs        = input.float(99.8, "B stop", step = 0.1, group = G1B)
+float hardStopAbs     = input.float(95, "Hard stop", step = 0.1, group = G1B)
+float invalidAbs      = input.float(96, "Invalidation", step = 0.1, group = G1B)
+float t1Abs           = input.float(110, "Target T1", step = 0.1, group = G1B)
+float t2Abs           = input.float(120, "Target T2", step = 0.1, group = G1B)
+float cEntryAbs       = input.float(118, "C pullback", step = 0.1, group = G1B)
+float cStopAbs        = input.float(114, "C stop", step = 0.1, group = G1B)
+float t3Abs           = input.float(130, "Trend target T3", step = 0.1, group = G1B)
+
+// Effective levels. Relative mode anchors to the last COMPLETED daily close:
+// stable within a day, TF-agnostic, auto-adapts to any symbol's price scale.
+float dClose = request.security(syminfo.tickerid, "1D", close[1], lookahead = barmerge.lookahead_on)
+bool isRel = lvlMode == "Relative %"
+float a1Top        = isRel and not na(dClose) ? dClose * (1 + a1TopPct / 100) : a1TopAbs
+float a1Bot        = isRel and not na(dClose) ? dClose * (1 + a1BotPct / 100) : a1BotAbs
+float a2Lvl        = isRel and not na(dClose) ? dClose * (1 + a2Pct / 100) : a2Abs
+float trigLvl      = isRel and not na(dClose) ? dClose * (1 + trigPct / 100) : trigAbs
+float bEntry       = isRel and not na(dClose) ? dClose * (1 + bEntryPct / 100) : bEntryAbs
+float bStop        = isRel and not na(dClose) ? dClose * (1 + bStopPct / 100) : bStopAbs
+float hardStop     = isRel and not na(dClose) ? dClose * (1 + hardStopPct / 100) : hardStopAbs
+float invalidClose = isRel and not na(dClose) ? dClose * (1 + invalidPct / 100) : invalidAbs
+float t1           = isRel and not na(dClose) ? dClose * (1 + t1Pct / 100) : t1Abs
+float t2           = isRel and not na(dClose) ? dClose * (1 + t2Pct / 100) : t2Abs
+float cEntry       = isRel and not na(dClose) ? dClose * (1 + cEntryPct / 100) : cEntryAbs
+float cStop        = isRel and not na(dClose) ? dClose * (1 + cStopPct / 100) : cStopAbs
+float t3           = isRel and not na(dClose) ? dClose * (1 + t3Pct / 100) : t3Abs
+
+string G2 = "2. Capital & Tranches"
+float capital = input.float(1000, "Total plan capital (quote ccy)", minval = 0, group = G2)
+float riskPct = input.float(3, "Max loss for whole plan (% of capital)", minval = 0.1, group = G2)
+float wA1     = input.float(40, "A1 tranche weight (%)", minval = 0, maxval = 100, group = G2)
+float wA2     = input.float(40, "A2 tranche weight (%)", minval = 0, maxval = 100, group = G2)
+float wB      = input.float(20, "B/C flexible weight (% — B or C, not both)", minval = 0, maxval = 100, group = G2)
+
+string G3 = "3. Alerts"
+int  confirmBars = input.int(2, "B trigger confirmation bars (consecutive closes above)", minval = 1, maxval = 10, group = G3)
+bool dynAlerts   = input.bool(true, "Dynamic alerts (with quantity — create one 'Any alert() call' alert)", group = G3)
+
+string G4 = "4. Drawing"
+bool showZones = input.bool(true, "Draw trade levels", group = G4)
+float bandPct  = input.float(7, "Draw only within ±% of price (protects price scale)", minval = 0.5, group = G4)
+bool autoZones = input.bool(false, "Auto suggestion zones (pivot clusters, reference only)", group = G4)
+int  swingLen  = input.int(10, "Auto zone pivot strength (bars L/R)", minval = 2, group = G4)
+int  lookback  = input.int(300, "Auto zone lookback (bars)", minval = 50, group = G4)
+float clustTol = input.float(3, "Auto zone cluster tolerance (%)", minval = 0.5, group = G4)
+bool showTable = input.bool(true, "Trade card table (tables never affect price scale)", group = G4)
+
+string G5 = "5. Structure lines (trendlines / breakout band / prior resistance — drawing only)"
+bool  showPattern = input.bool(true, "Draw structure lines", group = G5)
+float pBandPct    = input.float(20, "Structure line band (±% from price)", minval = 0.5, group = G5)
+string anchorMode = input.string("Auto pivots", "Trendline anchor mode", options = ["Auto pivots", "Manual"], group = G5)
+int   pvL    = input.int(10, "Auto pivot strength · left bars", minval = 2, group = G5)
+int   pvR    = input.int(10, "Auto pivot strength · right bars", minval = 2, group = G5)
+int   pvKeep = input.int(40, "Max pivots kept", minval = 5, group = G5)
+int   tlT1 = input.time(timestamp("01 Nov 2026 00:00 +0000"), "External · anchor 1 time (manual mode only)", group = G5)
+float tlP1 = input.price(125, "External · anchor 1 price (major top)", group = G5)
+int   tlT2 = input.time(timestamp("15 Nov 2026 12:00 +0000"), "External · anchor 2 time (manual mode only)", group = G5)
+float tlP2 = input.price(120, "External · anchor 2 price (next lower spike top)", group = G5)
+int   tl2T1 = input.time(timestamp("14 Nov 2026 00:00 +0000"), "Internal · anchor 1 time (manual mode only)", group = G5)
+float tl2P1 = input.price(103, "Internal · anchor 1 price", group = G5)
+int   tl2T2 = input.time(timestamp("20 Nov 2026 00:00 +0000"), "Internal · anchor 2 time (manual mode only)", group = G5)
+float tl2P2 = input.price(98, "Internal · anchor 2 price", group = G5)
+float brkBot = input.price(99.5, "Breakout band bottom (broken range top)", group = G5)
+float brkTop = input.price(100.5, "Breakout band top", group = G5)
+float resA = input.price(105, "Prior resistance A (platform high)", group = G5)
+float resB = input.price(125, "Prior resistance B (spike top)", group = G5)
+bool  dbg  = input.bool(false, "Debug row (trendline calc trace — leave off)", group = G5)
+float tl2Days = input.float(5, "Internal line lookback days (auto window)", minval = 0.5, group = G5)
+
+// —— Sizing & R:R: entry/stop/target triple on one screen. Qty = tranche risk ÷ stop distance (linear spot, no leverage). ——
+float planBudget = capital * riskPct / 100
+float a1Entry = (a1Top + a1Bot) / 2
+f_qty(float e, float s, float w) =>
+    float d = e - s
+    d > 0 ? planBudget * w / 100 / d : na
+f_rr(float e, float s, float t) =>
+    float d = e - s
+    d > 0 ? (t - e) / d : na
+float qA1 = f_qty(a1Entry, hardStop, wA1)
+float qA2 = f_qty(a2Lvl, hardStop, wA2)
+float qB  = f_qty(bEntry, bStop, wB)
+float qC  = f_qty(cEntry, cStop, wB)
+
+// —— Event detection (close-based, non-repainting) ——
+bool inA1 = low <= a1Top and high >= a1Bot
+bool touchA1 = inA1 and not inA1[1]
+var int aboveCnt = 0
+aboveCnt := close > trigLvl ? aboveCnt + 1 : 0
+bool bConfirm = aboveCnt == confirmBars
+bool touchHard = low <= hardStop and low[1] > hardStop
+bool touchT1 = high >= t1 and high[1] < t1
+bool touchT2 = high >= t2 and high[1] < t2
+// Daily-close checks use the same dClose computed above — identical semantics on any chart TF.
+bool dailyInvalid = not na(dClose) and not na(dClose[1]) and dClose < invalidClose and dClose[1] >= invalidClose
+bool cReady = not na(dClose) and not na(dClose[1]) and dClose > t2 and dClose[1] <= t2
+var bool planDead = false
+var bool a1Hit = false
+var bool t1Hit = false
+if dailyInvalid
+    planDead := true
+if touchA1
+    a1Hit := true
+if touchT1
+    t1Hit := true
+
+// —— Trade levels with band filter: only levels within ±band of price are drawn; far levels never stretch the price scale. ——
+float band = close * bandPct / 100
+f_box(float top, float bot, color c, string txt, bool en, float bnd) =>
+    var box b = na
+    var label lb = na
+    bool on = en and bot <= close + bnd and top >= close - bnd
+    if barstate.islast
+        if on
+            if na(b)
+                b := box.new(bar_index - 40, top, bar_index + 6, bot, border_color = color.new(c, 40), bgcolor = color.new(c, 85))
+            box.set_lefttop(b, bar_index - 40, top)
+            box.set_rightbottom(b, bar_index + 6, bot)
+            if na(lb)
+                lb := label.new(bar_index + 6, top, txt, style = label.style_label_left, color = color.white, textcolor = c, size = size.small)
+            label.set_xy(lb, bar_index + 6, top)
+            label.set_text(lb, txt)
+        else
+            box bOld = b
+            label lbOld = lb
+            b := na
+            lb := na
+            box.delete(bOld)
+            label.delete(lbOld)
+f_line(float y, color c, string txt, bool dashed, bool en, float bnd) =>
+    var line l = na
+    var label lb = na
+    bool on = en and math.abs(y - close) <= bnd
+    if barstate.islast
+        if on
+            if na(l)
+                l := line.new(bar_index - 40, y, bar_index + 6, y, color = c, style = dashed ? line.style_dashed : line.style_solid)
+            line.set_xy1(l, bar_index - 40, y)
+            line.set_xy2(l, bar_index + 6, y)
+            if na(lb)
+                lb := label.new(bar_index + 6, y, txt, style = label.style_label_left, color = color.white, textcolor = c, size = size.small)
+            label.set_xy(lb, bar_index + 6, y)
+            label.set_text(lb, txt)
+        else
+            line lOld = l
+            label lbOld = lb
+            l := na
+            lb := na
+            line.delete(lOld)
+            label.delete(lbOld)
+
+f_box(a1Top, a1Bot, color.teal, "A1 limit buy " + str.tostring(a1Bot, "#.####") + "–" + str.tostring(a1Top, "#.####"), showZones, band)
+f_box(t2, t1, color.red, "Supply zone T1–T2 (scale-out band)", showZones, band)
+f_line(a2Lvl, color.teal, "A2 half size " + str.tostring(a2Lvl, "#.####"), true, showZones, band)
+f_line(trigLvl, color.orange, "B trigger " + str.tostring(trigLvl, "#.####") + " (" + str.tostring(confirmBars) + " closes = stabilized)", false, showZones, band)
+f_line(bStop, color.maroon, "B stop " + str.tostring(bStop, "#.####"), true, showZones, band)
+f_line(hardStop, color.red, "Hard stop " + str.tostring(hardStop, "#.####"), false, showZones, band)
+f_line(invalidClose, color.purple, "Invalidation " + str.tostring(invalidClose, "#.####") + " (daily close < = void)", true, showZones, band)
+f_line(cEntry, color.blue, "C pullback " + str.tostring(cEntry, "#.####") + " (after daily close > T2)", true, showZones, band)
+
+// —— Structure lines (drawing only). Dual trendline engine:
+//    External = highest pivot → most recent lower pivot after it (strict wick extremes of THIS chart);
+//    Internal = least-squares regression over swing-high pivots in a time window ("through the majority of highs").
+float pband = close * pBandPct / 100
+f_box(brkTop, brkBot, color.gray, "Breakout band " + str.tostring(brkBot, "#.####") + "–" + str.tostring(brkTop, "#.####"), showPattern, pband)
+f_line(resA, color.gray, "Prior res A (platform)", true, showPattern, pband)
+f_line(resB, color.gray, "Prior res B (spike top)", true, showPattern, pband)
+var array<float> pvPrice = array.new<float>()
+var array<int> pvBar = array.new<int>()
+float pvHi = ta.pivothigh(high, pvL, pvR)
+if not na(pvHi)
+    array.push(pvPrice, pvHi)
+    array.push(pvBar, bar_index[pvR])
+    if array.size(pvPrice) > pvKeep
+        array.shift(pvPrice)
+        array.shift(pvBar)
+var line tlExt = na
+var label tlExtLb = na
+var line tlInt = na
+var label tlIntLb = na
+var int dbgN = 0
+var int dbgM = 0
+var float dbgY1 = na
+var float dbgY2 = na
+var bool dbgIntDraw = false
+var bool dbgIntAuto = false
+// Manual anchors are timestamps → converted to bar_index (runs once on last bar). Future times return na → skip drawing.
+f_barFromTime(int t) =>
+    int bi = na
+    for i = 0 to bar_index
+        if time[i] >= t
+            bi := i
+            break
+    bi
+if barstate.islast
+    if showPattern
+        // External: auto = highest pivot → most recent lower pivot; bar_index coords (same rendering path as trade lines).
+        int eX1 = f_barFromTime(tlT1)
+        float eP1 = tlP1
+        int eX2 = f_barFromTime(tlT2)
+        float eP2 = tlP2
+        if anchorMode == "Auto pivots" and array.size(pvPrice) >= 2
+            int n = array.size(pvPrice)
+            float pmax = array.max(pvPrice)
+            int iMax = -1
+            for i = 0 to n - 1
+                if iMax == -1 and array.get(pvPrice, i) == pmax
+                    iMax := i
+            int i2 = -1
+            if iMax >= 0 and iMax < n - 1
+                for i = iMax + 1 to n - 1
+                    if array.get(pvPrice, i) < pmax
+                        i2 := i
+            if i2 > iMax
+                eX1 := array.get(pvBar, iMax)
+                eP1 := pmax
+                eX2 := array.get(pvBar, i2)
+                eP2 := array.get(pvPrice, i2)
+        if not na(eX1) and not na(eX2) and eX2 > eX1 and eP2 < eP1
+            float eSlope = (eP2 - eP1) / (eX2 - eX1)
+            float eYnow = eP1 + eSlope * (bar_index - eX1)
+            if na(tlExt)
+                tlExt := line.new(eX1, eP1, eX2, eP2, color = color.gray, style = line.style_dashed, extend = extend.right)
+            line.set_xy1(tlExt, eX1, eP1)
+            line.set_xy2(tlExt, eX2, eP2)
+            if na(tlExtLb)
+                tlExtLb := label.new(bar_index + 6, eYnow, "", style = label.style_label_left, color = color.white, textcolor = color.gray, size = size.small)
+            label.set_xy(tlExtLb, bar_index + 6, eYnow)
+            label.set_text(tlExtLb, "Spike supply (external) " + str.tostring(eYnow, "#.####"))
+        // Internal: auto = least-squares regression over pivots within the last tl2Days days (x = small bar offsets).
+        int iX1 = f_barFromTime(tl2T1)
+        float iY1 = tl2P1
+        int iX2 = f_barFromTime(tl2T2)
+        float iY2 = tl2P2
+        if anchorMode == "Auto pivots" and array.size(pvPrice) >= 3
+            int n = array.size(pvPrice)
+            int lookBars = math.max(math.round(tl2Days * 86400 / timeframe.in_seconds()), 30)
+            int cutBar = bar_index - lookBars
+            int iFrom = -1
+            for i = 0 to n - 1
+                if array.get(pvBar, i) >= cutBar
+                    iFrom := i
+                    break
+            if iFrom == -1
+                iFrom := n - 1
+            int m = n - iFrom
+            dbgM := m
+            if m >= 2
+                int b0 = array.get(pvBar, iFrom)
+                float sx = 0.0
+                float sy = 0.0
+                float sxy = 0.0
+                float sxx = 0.0
+                for i = iFrom to n - 1
+                    float x = array.get(pvBar, i) - b0
+                    float y = array.get(pvPrice, i)
+                    sx += x
+                    sy += y
+                    sxy += x * y
+                    sxx += x * x
+                float denom = m * sxx - sx * sx
+                dbgIntAuto := denom > 0
+                if denom > 0
+                    float bs = (m * sxy - sx * sy) / denom
+                    float ia = (sy - bs * sx) / m
+                    iX1 := b0
+                    iY1 := ia
+                    iX2 := bar_index + 6
+                    iY2 := ia + bs * (iX2 - b0)
+        dbgN := array.size(pvPrice)
+        dbgY1 := iY1
+        dbgY2 := iY2
+        if not na(iX1) and not na(iX2) and iX2 > iX1
+            dbgIntDraw := true
+            float iSlope = (iY2 - iY1) / (iX2 - iX1)
+            float iYnow = iY1 + iSlope * (bar_index - iX1)
+            if na(tlInt)
+                tlInt := line.new(iX1, iY1, iX2, iY2, color = color.blue, style = line.style_solid, width = 1, extend = extend.right)
+            line.set_xy1(tlInt, iX1, iY1)
+            line.set_xy2(tlInt, iX2, iY2)
+            if na(tlIntLb)
+                tlIntLb := label.new(bar_index + 6, iYnow, "", style = label.style_label_left, color = color.white, textcolor = color.blue, size = size.small)
+            label.set_xy(tlIntLb, bar_index + 6, iYnow)
+            label.set_text(tlIntLb, "Trend line (internal) " + str.tostring(iYnow, "#.####"))
+    else
+        line tlExtOld = tlExt
+        label tlExtLbOld = tlExtLb
+        line tlIntOld = tlInt
+        label tlIntLbOld = tlIntLb
+        tlExt := na
+        tlExtLb := na
+        tlInt := na
+        tlIntLb := na
+        line.delete(tlExtOld)
+        label.delete(tlExtLbOld)
+        line.delete(tlIntOld)
+        label.delete(tlIntLbOld)
+
+// —— R:R info lives in the table only (an RR ruler pinned at T1/T2 prices would wreck the price scale). ——
+
+// —— Auto suggestion zones: pivot high/low clusters — reference for finding supply/demand on a new symbol; NOT used in any trade math. ——
+ph = ta.pivothigh(high, swingLen, swingLen)
+pl = ta.pivotlow(low, swingLen, swingLen)
+var array<float> phArr = array.new<float>()
+var array<float> plArr = array.new<float>()
+if not na(ph)
+    array.push(phArr, ph)
+    if array.size(phArr) > 30
+        array.shift(phArr)
+if not na(pl)
+    array.push(plArr, pl)
+    if array.size(plArr) > 30
+        array.shift(plArr)
+f_cluster(array<float> arr, bool isHigh) =>
+    float ext = array.size(arr) > 0 ? (isHigh ? array.max(arr) : array.min(arr)) : na
+    float inner = na
+    if not na(ext)
+        for v in arr
+            bool inC = isHigh ? v >= ext * (1 - clustTol / 100) : v <= ext * (1 + clustTol / 100)
+            if inC
+                inner := na(inner) ? v : isHigh ? math.min(inner, v) : math.max(inner, v)
+    [ext, inner]
+[supTop, supBot] = f_cluster(phArr, true)
+[demBot, demTop] = f_cluster(plArr, false)
+var box supBox = na
+var box demBox = na
+if barstate.islast and autoZones and not na(supTop) and not na(supBot) and supTop > supBot and supBot <= close + band and supTop >= close - band
+    if na(supBox)
+        supBox := box.new(bar_index - lookback, supTop, bar_index, supBot, border_color = color.new(color.red, 70), bgcolor = color.new(color.red, 94))
+    box.set_lefttop(supBox, bar_index - lookback, supTop)
+    box.set_rightbottom(supBox, bar_index, supBot)
+if barstate.islast and autoZones and not na(demBot) and not na(demTop) and demTop > demBot and demBot <= close + band and demTop >= close - band
+    if na(demBox)
+        demBox := box.new(bar_index - lookback, demTop, bar_index, demBot, border_color = color.new(color.green, 70), bgcolor = color.new(color.green, 94))
+    box.set_lefttop(demBox, bar_index - lookback, demTop)
+    box.set_rightbottom(demBox, bar_index, demBot)
+
+// —— Trade card table ——
+f_cell(float v, string fmt = "#.####") =>
+    na(v) ? "—" : str.tostring(v, fmt)
+var table card = table.new(position.top_right, 8, 7, bgcolor = color.white, frame_color = color.gray, frame_width = 1, border_color = color.new(color.gray, 75), border_width = 1)
+if barstate.islast and showTable
+    string status = planDead ? "VOID — cancel all" : t1Hit ? "T1 hit — half out" : inA1 ? "In A1 zone" : a1Hit ? "A1 touched, left" : aboveCnt >= confirmBars ? "B confirmed" : close > trigLvl ? "Above trigger" : "Below trigger · wait"
+    table.cell(card, 0, 0, "Plan (" + str.tostring(riskPct, "#.#") + "% = " + str.tostring(planBudget, "#.#") + ")", text_color = color.black, text_size = size.small)
+    table.cell(card, 1, 0, "Entry", text_color = color.gray, text_size = size.small)
+    table.cell(card, 2, 0, "Stop", text_color = color.gray, text_size = size.small)
+    table.cell(card, 3, 0, "RR→T1", text_color = color.gray, text_size = size.small)
+    table.cell(card, 4, 0, "RR→T2", text_color = color.gray, text_size = size.small)
+    table.cell(card, 5, 0, "Qty", text_color = color.gray, text_size = size.small)
+    table.cell(card, 6, 0, "Value", text_color = color.gray, text_size = size.small)
+    table.cell(card, 7, 0, "Status: " + status, text_color = planDead ? color.red : color.rgb(0, 102, 204), text_size = size.small)
+    table.cell(card, 0, 1, "A1 " + str.tostring(wA1, "#") + "% limit", text_color = color.teal, text_size = size.small)
+    table.cell(card, 1, 1, f_cell(a1Entry), text_color = color.teal, text_size = size.small)
+    table.cell(card, 2, 1, f_cell(hardStop), text_color = color.teal, text_size = size.small)
+    table.cell(card, 3, 1, f_cell(f_rr(a1Entry, hardStop, t1), "#.##"), text_color = color.teal, text_size = size.small)
+    table.cell(card, 4, 1, f_cell(f_rr(a1Entry, hardStop, t2), "#.##"), text_color = color.teal, text_size = size.small)
+    table.cell(card, 5, 1, f_cell(qA1, "#"), text_color = color.teal, text_size = size.small)
+    table.cell(card, 6, 1, f_cell(qA1 * a1Entry, "#"), text_color = color.teal, text_size = size.small)
+    table.cell(card, 0, 2, "A2 " + str.tostring(wA2, "#") + "% limit", text_color = color.teal, text_size = size.small)
+    table.cell(card, 1, 2, f_cell(a2Lvl), text_color = color.teal, text_size = size.small)
+    table.cell(card, 2, 2, f_cell(hardStop), text_color = color.teal, text_size = size.small)
+    table.cell(card, 3, 2, f_cell(f_rr(a2Lvl, hardStop, t1), "#.##"), text_color = color.teal, text_size = size.small)
+    table.cell(card, 4, 2, f_cell(f_rr(a2Lvl, hardStop, t2), "#.##"), text_color = color.teal, text_size = size.small)
+    table.cell(card, 5, 2, f_cell(qA2, "#"), text_color = color.teal, text_size = size.small)
+    table.cell(card, 6, 2, f_cell(qA2 * a2Lvl, "#"), text_color = color.teal, text_size = size.small)
+    table.cell(card, 0, 3, "B confirm mkt", text_color = #CC6600, text_size = size.small)
+    table.cell(card, 1, 3, f_cell(bEntry), text_color = #CC6600, text_size = size.small)
+    table.cell(card, 2, 3, f_cell(bStop), text_color = #CC6600, text_size = size.small)
+    table.cell(card, 3, 3, f_cell(f_rr(bEntry, bStop, t1), "#.##"), text_color = #CC6600, text_size = size.small)
+    table.cell(card, 4, 3, f_cell(f_rr(bEntry, bStop, t2), "#.##"), text_color = #CC6600, text_size = size.small)
+    table.cell(card, 5, 3, f_cell(qB, "#"), text_color = #CC6600, text_size = size.small)
+    table.cell(card, 6, 3, f_cell(qB * bEntry, "#"), text_color = #CC6600, text_size = size.small)
+    table.cell(card, 0, 4, "C trend pb", text_color = color.blue, text_size = size.small)
+    table.cell(card, 1, 4, f_cell(cEntry), text_color = color.blue, text_size = size.small)
+    table.cell(card, 2, 4, f_cell(cStop), text_color = color.blue, text_size = size.small)
+    table.cell(card, 3, 4, f_cell(f_rr(cEntry, cStop, t2), "#.##"), text_color = color.blue, text_size = size.small)
+    table.cell(card, 4, 4, f_cell(f_rr(cEntry, cStop, t3), "#.##") + " (T3)", text_color = color.blue, text_size = size.small)
+    table.cell(card, 5, 4, f_cell(qC, "#"), text_color = color.blue, text_size = size.small)
+    table.cell(card, 6, 4, f_cell(qC * cEntry, "#"), text_color = color.blue, text_size = size.small)
+    if dbg
+        table.cell(card, 0, 5, "Dbg: pivots " + str.tostring(dbgN) + " win " + str.tostring(dbgM) + " int " + (na(dbgY1) ? "na" : str.tostring(dbgY1, "#.####")) + "→" + (na(dbgY2) ? "na" : str.tostring(dbgY2, "#.####")) + (dbgIntDraw ? " draw" : " skip") + (dbgIntAuto ? " reg" : " manual"), text_color = color.gray, text_size = size.tiny)
+        table.cell(card, 1, 5, "", text_size = size.tiny)
+    table.cell(card, 0, 6, "Alerts = manual review · qty is full-size, verify · invalidation on daily close", text_color = color.gray, text_size = size.tiny)
+    table.cell(card, 1, 6, "", text_size = size.tiny)
+
+// —— Alerts: 1..7 via individual alertconditions; or one "Any alert() call" alert for dynamic messages incl. quantity. ——
+alertcondition(touchA1, "1) Price enters A1 zone", "A1 zone {{ticker}} @{{close}} — check main limit buy")
+alertcondition(bConfirm, "2) B trigger confirmed (consecutive closes above trigger)", "B confirmed {{ticker}} @{{close}} — stabilization, first tranche may enter")
+alertcondition(touchHard, "3) Hard stop touched intrabar", "Hard stop {{ticker}} @{{close}} — exit unconditionally")
+alertcondition(dailyInvalid, "4) Daily close below invalidation", "Daily close < invalidation {{ticker}} @{{close}} — plan void, cancel all open orders")
+alertcondition(touchT1, "5) T1 touched", "T1 touched {{ticker}} @{{close}} — scale out half")
+alertcondition(touchT2, "6) T2 touched", "T2 touched {{ticker}} @{{close}} — scale out half again")
+alertcondition(cReady, "7) Daily close above T2 (C plan armed)", "Daily close > T2 {{ticker}} @{{close}} — trend confirmed, wait for C pullback")
+
+if dynAlerts
+    if touchA1
+        alert(str.format("1) A1 zone touched @{0} | limit {1}-{2} | qty ≈{3} (val {4}) | stop {5} | T1 RR {6}", str.tostring(close), str.tostring(a1Bot, "#.####"), str.tostring(a1Top, "#.####"), f_cell(qA1, "#"), f_cell(qA1 * a1Entry, "#"), str.tostring(hardStop, "#.####"), f_cell(f_rr(a1Entry, hardStop, t1), "#.##")), alert.freq_once_per_bar_close)
+    if bConfirm
+        alert(str.format("2) B confirmed @{0} | market entry | qty ≈{1} (val {2}) | stop {3}", str.tostring(close), f_cell(qB, "#"), f_cell(qB * bEntry, "#"), str.tostring(bStop, "#.####")), alert.freq_once_per_bar_close)
+    if touchHard
+        alert("3) Hard stop touched @" + str.tostring(close) + " | exit unconditionally, cancel all open orders", alert.freq_once_per_bar_close)
+    if dailyInvalid
+        alert("4) Daily close below invalidation @" + str.tostring(dClose) + " | plan void, cancel A/B open orders", alert.freq_once_per_bar_close)
+    if touchT1
+        alert(str.format("5) T1 touched @{0} | scale out half", str.tostring(close)), alert.freq_once_per_bar_close)
+    if touchT2
+        alert(str.format("6) T2 touched @{0} | scale out half again, trail the rest", str.tostring(close)), alert.freq_once_per_bar_close)
+    if cReady
+        alert(str.format("7) Daily close above T2 @{0} | C plan armed: limit at {1}", str.tostring(dClose), str.tostring(cEntry, "#.####")), alert.freq_once_per_bar_close)
